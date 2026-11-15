@@ -94,18 +94,31 @@ service shipped with that host):
   `sendMessage` channel both versions keep is only a degraded steer and its text says so.
 - **The 0.2.0 fallback** (`startContinuable` / `start`) is retained, but it was **not**
   re-exercised on a real host in this round.
+- **Tool-catalog root enumeration**: DSH 0.2.1 and earlier exposed `agents.roots()`; 0.2.2 has
+  only `agents.list()`, which returns **every live agent**, delegated children included. The
+  plugin prefers `roots()`, and on a `list()`-only host filters the roots first with the
+  host's own depth rule (`max(options.subagentDepth, session.header.delegationDepth)`) before
+  reading each scope's registered tools. A GUI fork therefore stays a main agent (it carries
+  a `parentSession` but a depth of zero) and keeps its scope tools in the panel, while a
+  child scope's private tools never leak into it. An unreadable or throwing registry
+  contributes no agent scopes — it is **never** widened to "every live agent". This is what
+  makes scope-local tools such as `exit_plan_mode` and `list_agents` visible in Allowed Tools.
 
 ### What has actually been verified
 
 - **Live-verified on the VM**, host `DSH 0.2.2-rc.3`: dynamic `delegate`, `orchestrate` and
   plan approval all worked, and the plan-approval button was confirmed by the user. That run
   used the **earlier single-shape compat build**.
-- **This branch**: the dual-shape layer is **contract/regression tested only** —
-  `node --test --test-isolation=none`, 372 tests passing, covering the 0.2.1 nested contract,
-  the 0.2.2 flat contract, the no-`startActivation` fallback, route / parent / cwd / maxDepth /
-  outputSchema / delivery / signal pass-through, `receipt.result`, failure propagation and
-  every delivery channel. **No live run of this branch's build was performed**, so it must not
-  be described as "the final PR build passed on a real machine".
+- **This branch**: the dual-shape layer and the catalog's root enumeration are
+  **contract/regression tested only** — `node --test --test-isolation=none`, 381 tests
+  passing, covering the 0.2.1 nested contract, the 0.2.2 flat contract, the
+  no-`startActivation` fallback, route / parent / cwd / maxDepth / outputSchema / delivery /
+  signal pass-through, `receipt.result`, failure propagation and every delivery channel, plus
+  the `roots()` / `list()` root enumerations, persisted depth, GUI forks, broken registries
+  and catalog update events. **No live run of this branch's build against the changed tool
+  catalog was performed** (the host runtime needs a restart to load this build; see the PR
+  notes), so it must not be described as "the final PR build passed end-to-end on a real
+  machine".
 - **Windows `0.2.1-rc.3`**: that host ran the **original, unmodified** plugin normally. That is
   historical evidence for the nested shape; it is not a run of this branch.
 - The 0.2.0 fallback was not re-tested in this round, and no "CI is green" claim is made before
@@ -126,7 +139,10 @@ service shipped with that host):
    five read-only session tools); add `exit_plan_mode` when plan approval is used and
    `list_agents` when children are listed. **A list written in the profile replaces the
    default as a whole — it is not merged incrementally**, so a shorter list silently removes
-   tools the default would have allowed.
+   tools the default would have allowed, and "Reset to defaults" (or deleting the field)
+   returns to the 12 built-ins, dropping both scope-local names again. **A name you can see in
+   the panel is not a name that is allowed**: only what is written into `allowedTools` (exact
+   match) is granted.
 5. **Do not assume the panel's checkboxes were persisted**: after an upgrade or a plugin
    reload, compare the panel with the value actually in the profile (re-select the boxes if
    needed) and then confirm a tool you rely on is really callable.
@@ -135,7 +151,57 @@ service shipped with that host):
 > reads `enabled`, `allowedTools` and the worker route live, so the fix belongs in the profile
 > or the panel — never in `lib/` for one machine. An example profile is in
 > [docs/host-compatibility.md](docs/host-compatibility.md); its provider and model are
-> placeholders, so pick a route your own host offers. The plugin does not fix any route.
+> placeholders, so pick a route your own host offers. The plugin does not fix any route and
+> does not hard-code any private model into its repository defaults.
+
+### `toolCatalog` vs `allowedTools` (visible is not allowed)
+
+- **`toolCatalog`** is a **read-only snapshot** of the host's tool registry: the global tools
+  plus every tool a live root agent's scope registers (`exit_plan_mode`, `list_agents`, the
+  native `subagent`, `ops_*`, …). It exists so the panel can render a complete checklist; it
+  never writes the profile and never grants anything.
+- **`allowedTools`** is the whitelist the gate actually enforces, matched by **exact tool
+  name** (no prefix, glob or substring matching). A name outside it is hidden and refused at
+  execution time even when it is listed in `toolCatalog`; a name inside it that the host never
+  registered does not error — it simply never applies. So a tool is usable only when the host
+  registers it **and** `allowedTools` contains it.
+- **Replacement, not merge**: once `allowedTools` is written explicitly it replaces the 12
+  built-in defaults as a whole; the other fields (`enabled`, the worker route, …) are kept.
+
+A complete example (the provider/model are placeholders — use a route your own host offers):
+
+```yaml
+# <profile>/cordis.patch.yml — only the relevant block; keep your other entries as they are
+- id: orchestrator
+  name: dsh-orchestrator
+  config:
+    enabled: true
+    workerProvider: <your-worker-provider>   # e.g. the provider id shown in your panel
+    workerModel: <your-worker-model>         # e.g. the cheap model you chose
+    workerReasoningEffort: ""
+    superviseIntervalSeconds: 600
+    allowedTools:
+      # -- the 12 built-in defaults: an explicit list has to repeat them in full --
+      - delegate
+      - orchestrate
+      - send_message
+      - interrupt_agent
+      - todo_write
+      - ask_user_question
+      - compress
+      - session_search
+      - session_trace
+      - session_event_search
+      - session_event_read
+      - session_event_trace
+      # -- optional scope-local tools: the host must register them AND they must be listed --
+      - exit_plan_mode
+      - list_agents
+```
+
+> This list is **your machine's profile configuration**, not a repository default: the shipped
+> `DEFAULT_ALLOWED_TOOLS` stays at 12 names and is not changed for one host or one private
+> route.
 
 ### Minimum acceptance after an upgrade
 
@@ -176,7 +242,7 @@ Every field is volatile: the host stores it and the plugin re-reads it on each u
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Master switch for dispatch mode. When off it revokes the hiding; the guard stays installed but lets calls through. |
-| `allowedTools` | 12 built-ins | Whitelist-driven: the main agent may use only the tools listed here; every other host, MCP, or plugin tool is hidden and disabled automatically. Check a row in the panel's Allowed Tools column to allow it, uncheck to block it; effective on the next message. |
+| `allowedTools` | 12 built-ins | Whitelist-driven: the main agent may use only the tools listed here; every other host, MCP, or plugin tool is hidden and disabled automatically. Check a row in the panel's Allowed Tools column to allow it, uncheck to block it; effective on the next message. An explicit list replaces the default as a whole and "Reset to defaults" returns to the 12 built-ins. |
 | `workerProvider` | `""` | Subagent provider; empty means unconfigured. |
 | `workerModel` | `""` | Subagent model; empty means unconfigured. |
 | `workerReasoningEffort` | `""` | Subagent reasoning effort; empty means it is not passed and the model resolves the default. |
@@ -185,7 +251,7 @@ Every field is volatile: the host stores it and the plugin re-reads it on each u
 | `superviseMaxNoticesPerChild` | `3` | Most notices per subagent, an integer 0–20. `0` turns supervision off; the running child stays registered, so raising the number or switching unlimited on resumes it at once. |
 | `superviseUnlimited` | `false` | Unlimited supervision. When on, the `superviseMaxNoticesPerChild` cap (including `0`) is ignored: as long as the child has not stopped, delivered or ended, it is reported every interval, and the notice header drops the denominator (`第 N 次`). |
 | `superviseNotifyOnNoProgress` | `false` | Whether to also notify when the log has no new activity (unlimited supervision always reports). |
-| `toolCatalog` | `[]` | The live tool catalog the plugin publishes: every tool name the host currently offers, which is how the panel lists tools beyond the 12 built-in allowed tools (MCP servers and other plugins included). Written by the plugin; do not edit it by hand. |
+| `toolCatalog` | `[]` | The live tool catalog the plugin publishes: every tool name the host currently offers — global tools plus the tools each live root agent's scope registers — which is how the panel lists tools beyond the 12 built-in allowed tools (MCP servers, other plugins, and scope-local tools included). Written by the plugin; do not edit it by hand. Being listed here means "visible", not "allowed". |
 
 The main agent's default route is not part of this configuration: it lives in the host's `agent-default-model` (`provider` / `model` / `reasoningEffort`), is written by the same panel, and is read when a new agent is created.
 

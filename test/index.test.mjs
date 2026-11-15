@@ -1222,3 +1222,31 @@ test('the published catalog includes tools a scope registers for a root agent', 
   })
   assert.deepEqual(harness.catalog(), ['read', 'subagent'])
 })
+
+test('a list-only 0.2.2 registry publishes a root scope, and never a child scope', () => {
+  // The 0.2.2 AgentRegistry only has list(); the catalog must derive the root subset
+  // itself, or every scope-local tool (exit_plan_mode, list_agents) vanishes from the panel.
+  const root = fakeAgent()
+  root.agent.ctx.tools.view = () => ({ knownNames: new Set(['exit_plan_mode', 'list_agents']), visible: new Map() })
+  const child = fakeAgent({ id: 'child-1', depth: 1 })
+  child.agent.ctx.tools.view = () => ({ knownNames: new Set(['worker_only']), visible: new Map() })
+  const harness = start({
+    catalogNames: ['read'],
+    agents: { get: () => undefined, list: () => [child.agent, root.agent] },
+  })
+  assert.deepEqual(harness.catalog(), ['exit_plan_mode', 'list_agents', 'read'])
+})
+
+test('a GUI-fork root is gated as a main agent and its scope tools are listed', () => {
+  // A fork has a parentSession but a delegation depth of zero, which is what the host's
+  // own depth rule reads: it stays a main agent, so its scope tools belong in the panel.
+  const fork = fakeAgent({ id: 'fork', header: { parentSession: 'origin' } })
+  fork.agent.ctx.tools.view = () => ({ knownNames: new Set(['exit_plan_mode']), visible: new Map() })
+  const harness = start({
+    catalogNames: ['read'],
+    agents: { get: () => undefined, list: () => [fork.agent] },
+  })
+  assert.deepEqual(harness.catalog(), ['exit_plan_mode', 'read'])
+  harness.created({ agent: fork.agent, source: 'create' })
+  assert.equal(fork.guards.length, 1, 'a fork with a parent but no delegation depth is a main agent')
+})

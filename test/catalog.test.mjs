@@ -6,6 +6,7 @@ import {
   collectCatalog,
   createCatalogPublisher,
   isVolatileRef,
+  rootAgents,
   viewNames,
 } from '../lib/catalog.js'
 
@@ -74,6 +75,150 @@ test('collectCatalog survives a missing or throwing registry, scope or root list
     agents: { roots: () => [{ id: 'broken', ctx: { tools: { view: () => { throw new Error('gone') } } } }] },
   }
   assert.deepEqual(collectCatalog(brokenRoot), ['read'])
+})
+
+/** One live-agent entry shaped like the 0.2.2 AgentRegistry.list() array. */
+function liveAgent({ id = 'root', depth, header = {}, names = ['subagent'] } = {}) {
+  return {
+    id,
+    options: depth === undefined ? {} : { subagentDepth: depth },
+    session: { header },
+    ctx: { tools: { view: () => view(names, names) } },
+  }
+}
+
+test('a list-only 0.2.2 registry contributes its roots and never a child scope', () => {
+  // The 0.2.2 AgentRegistry has no roots(): it answers list() with every live agent, so
+  // membership has to come from the host's depth rule instead.
+  const root = liveAgent({ id: 'root', names: ['exit_plan_mode', 'list_agents'] })
+  // A persisted depth is the only record a cold-resumed child still carries.
+  const resumed = liveAgent({ id: 'child-a', header: { delegationDepth: 1 }, names: ['worker_only'] })
+  // A freshly spawned child carries it in its live options.
+  const spawned = liveAgent({ id: 'child-b', depth: 1, names: ['worker_only'] })
+  const ctx = {
+    tools: { view: () => view(['read', 'edit']) },
+    agents: { list: () => [resumed, spawned, root] },
+  }
+  assert.deepEqual(collectCatalog(ctx), ['edit', 'exit_plan_mode', 'list_agents', 'read'])
+})
+
+test('a GUI fork is a root even though it carries a parentSession', () => {
+  // A fork is a new root session: parentSession set, delegation depth zero. The presence
+  // of a parent must not drop its scope tools from the panel, or exit_plan_mode vanishes
+  // on a forked conversation.
+  const fork = liveAgent({ id: 'fork', header: { parentSession: 'origin' }, names: ['exit_plan_mode'] })
+  const child = liveAgent({
+    id: 'child',
+    header: { parentSession: 'fork', delegationDepth: 1 },
+    names: ['worker_only'],
+  })
+  const ctx = {
+    tools: { view: () => view(['read']) },
+    agents: { list: () => [fork, child] },
+  }
+  assert.deepEqual(collectCatalog(ctx), ['exit_plan_mode', 'read'])
+})
+
+test('legacy roots() is preferred, and its entries are filtered by the same depth rule', () => {
+  let listCalls = 0
+  const root = liveAgent({ id: 'root', names: ['subagent'] })
+  const child = liveAgent({ id: 'child', depth: 1, names: ['worker_only'] })
+  const ctx = {
+    tools: { view: () => view(['read']) },
+    agents: {
+      roots: () => [root, child],
+      list: () => {
+        listCalls += 1
+        return []
+      },
+    },
+  }
+  assert.deepEqual(collectCatalog(ctx), ['read', 'subagent'])
+  assert.equal(listCalls, 0, 'a host that still has roots() is not asked for its full list')
+})
+
+test('a throwing or malformed roots() falls back to list(), and a doubly broken registry yields nothing', () => {
+  const root = liveAgent({ id: 'root', names: ['exit_plan_mode'] })
+  const throwingRoots = {
+    tools: { view: () => view(['read']) },
+    agents: {
+      roots: () => {
+        throw new Error('no roots')
+      },
+      list: () => [root],
+    },
+  }
+  assert.deepEqual(collectCatalog(throwingRoots), ['exit_plan_mode', 'read'])
+
+  const malformedRoots = {
+    tools: { view: () => view(['read']) },
+    agents: { roots: () => undefined, list: () => [root] },
+  }
+  assert.deepEqual(collectCatalog(malformedRoots), ['exit_plan_mode', 'read'])
+
+  // No fallback ever widens the panel to every live agent: a broken list() contributes
+  // no agent scopes at all, while the global view still publishes.
+  const broken = {
+    tools: { view: () => view(['read']) },
+    agents: {
+      roots: () => {
+        throw new Error('a')
+      },
+      list: () => {
+        throw new Error('b')
+      },
+    },
+  }
+  assert.deepEqual(collectCatalog(broken), ['read'])
+  const neither = { tools: { view: () => view(['read']) }, agents: { get: () => undefined } }
+  assert.deepEqual(collectCatalog(neither), ['read'])
+  assert.deepEqual(rootAgents({ get: () => undefined }), [])
+  assert.deepEqual(rootAgents(undefined), [])
+})
+
+test('a dirty depth is treated as absent instead of hiding a root', () => {
+  // Mirrors gate.js: a negative, fractional, NaN or string depth is not a delegation
+  // depth, so the agent stays a root and keeps its scope tools in the panel.
+  const dirty = [
+    liveAgent({ id: 'negative', depth: -1, names: ['list_agents'] }),
+    liveAgent({ id: 'fractional', depth: 1.5, names: ['exit_plan_mode'] }),
+    liveAgent({ id: 'string', header: { delegationDepth: '1' }, names: ['compress'] }),
+  ]
+  assert.deepEqual(
+    rootAgents({ list: () => dirty }).map((agent) => agent.id),
+    ['negative', 'fractional', 'string'],
+  )
+})
+
+test('the catalog reports its roots by list() when roots() is absent, and by roots() when present', () => {
+  const root = liveAgent({ id: 'root' })
+  const child = liveAgent({ id: 'child', header: { delegationDepth: 1 } })
+  assert.deepEqual(rootAgents({ list: () => [child, root] }), [root])
+  assert.deepEqual(rootAgents({ roots: () => [root], list: () => [root, child] }), [root])
+})
+
+test('a newly listed root scope republishes the catalog and announces it', () => {
+  const { ctx: base, config, events } = fakeHost()
+  let live = [liveAgent({ id: 'root', names: ['subagent'] })]
+  const ctx = {
+    ...base,
+    tools: { view: () => view(['read']) },
+    agents: { list: () => live },
+  }
+  const publisher = createCatalogPublisher({ ctx, config })
+  assert.deepEqual(publisher.publish(), { changed: true, names: ['read', 'subagent'] })
+  assert.deepEqual(config[CATALOG_KEY].get(), ['read', 'subagent'])
+  assert.deepEqual(events, [['settings/document-updated', 'orchestrator', 1]])
+
+  // A new root (a fork or a second session) registering scope-local tools is a real
+  // change: it is committed and the panel is told to re-read, with no timer involvement.
+  live = [liveAgent({ id: 'root', names: ['subagent', 'exit_plan_mode', 'list_agents'] })]
+  assert.deepEqual(publisher.publish(), {
+    changed: true,
+    names: ['exit_plan_mode', 'list_agents', 'read', 'subagent'],
+  })
+  assert.deepEqual(config[CATALOG_KEY].get(), ['exit_plan_mode', 'list_agents', 'read', 'subagent'])
+  assert.deepEqual(events.at(-1), ['settings/document-updated', 'orchestrator', 2])
 })
 
 test('only a real volatile reference is writable', () => {

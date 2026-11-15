@@ -62,6 +62,40 @@ A retry must be a **new turn** on the same durable child, so the ranking is:
 A host refusal is re-thrown with the channel name, the host `code` and `cause` intact, so
 the retry notice the parent reads names the real reason.
 
+### 4. Tool catalog root enumeration (`roots()` in 0.2.1, `list()` in 0.2.2)
+
+The Allowed Tools panel is rendered by the web client, which cannot enumerate the host's
+tools itself. The plugin therefore publishes a **read-only catalog** through its own config
+field (`toolCatalog`, see `lib/catalog.js`): the union of the context-global registry view
+and each **live root agent's** scope view. The root scopes are the only place a preset or
+scope-local tool — `exit_plan_mode`, `list_agents`, the native `subagent`, every `ops_*` —
+becomes visible, so finding the roots correctly is what puts those rows in the panel.
+
+The two host generations expose the live agents differently (checked in the shipped
+`@deepseek-ai/dsh-agent` package of each host, not from release notes):
+
+| DSH | Live-agent API | What the plugin does |
+| --- | --- | --- |
+| 0.2.1-rc.3 and earlier | `agents.roots()` | Used first; an array is taken as the root set. |
+| 0.2.2-rc.3 | `agents.get(id)` and `agents.list()` only — the `AgentRegistry` class has no `roots()` | `list()` is filtered to roots by the host's own depth rule. |
+
+The filter mirrors the host's `delegationDepthOf` /
+`isDelegatedChild` (`lib/gate.js`): the effective depth is
+`max(agent.options.subagentDepth ?? 0, agent.session.header.delegationDepth ?? 0)`, and an
+agent is a root exactly when that is zero. Two consequences matter:
+
+- **A GUI fork is a root.** It carries a `parentSession` but a depth of zero, so it is not
+  excluded by looking at `parentSession`; its scope tools stay listable.
+- **A cold-resumed child is not.** Its `subagentDepth` option is gone after a resume, but the
+  persisted `session.header.delegationDepth` still records it, so it stays excluded and its
+  scope's private tools never reach the main agent's panel.
+
+Failure handling is deliberately narrow: a throwing `roots()` falls through to `list()`, a
+throwing or malformed `list()` contributes **no agent scopes**, and the global view is still
+published. There is no "all live agents" fallback — that would leak child scopes into the
+main agent's panel. The catalog is display input only: it grants nothing (see the next
+section's note in the READMEs about `toolCatalog` vs `allowedTools`).
+
 ## Verification boundary
 
 Read this before quoting any of the above as "works on version X".
@@ -72,6 +106,7 @@ Read this before quoting any of the above as "works on version X".
 | The dual-shape layer in **this branch** | **Contract-tested only.** Its suites drive host doubles whose first read matches the shipped service, plus the production spec producer. No live run of this branch's build was performed on a real host. |
 | Windows host `DSH 0.2.1-rc.3`: the **original, unmodified** 0.8.0 plugin ran normally | **Historical observation.** It is evidence for the nested shape; it is not a run of this branch. |
 | `startContinuable` / `start` fallback for 0.2.0-rc.3 | **Retained, not re-verified** on a real host in this round. |
+| Catalog root enumeration (`roots()` vs `list()`) | **Contract-tested** against a roots-only registry, a list-only 0.2.2 registry (persisted depth, live depth, GUI fork), a throwing/malformed registry and the catalog update event. The 0.2.2 `AgentRegistry` shape (no `roots()`, `list()` present) was read from the shipped package. The panel rendering itself was not re-verified live in this branch. |
 | CI | **No claim.** No workflow run of this branch is asserted here. |
 
 Repeating the live check is a good idea before tagging a release: install the tarball on a
@@ -96,7 +131,10 @@ DSH upgrades can rewrite or reset profile state. Do these in order.
    Add `exit_plan_mode` and `list_agents` when plan approval and child listing are used.
    A list written in the profile **replaces** the default as a whole — it is not merged, not
    incremental. A shorter list therefore silently removes tools the default would have
-   granted.
+   granted, and "Reset to defaults" (or deleting the field) returns to the 12 built-ins.
+   Matching is by exact registered name: a name listed in `toolCatalog` (what the panel can
+   show) is not allowed until it is also written into `allowedTools`, and a typo there
+   silently never applies.
 5. Do not assume the panel's checkboxes were persisted: after an upgrade or a plugin reload,
    compare what the panel shows with the value in the profile (or re-select the boxes), and
    confirm a tool you expect is actually callable.
@@ -140,6 +178,11 @@ orchestrator:
     - exit_plan_mode
     - list_agents
 ```
+
+The example repeats the shipped 12 defaults in full and appends the two scope-local names,
+because the field replaces the default instead of extending it. The provider/model values are
+placeholders, not recommendations; the repository's own defaults are not changed for any
+specific host or private route.
 
 ## Minimum acceptance after an upgrade
 
