@@ -83,6 +83,7 @@ DSH 客户端自带了 `subagent` / `workflow`，官方也有 `@deepseek-ai/dsh-
 | 项目 | 要求 |
 | --- | --- |
 | **宿主环境** | DeepSeek Harness Desktop / Web GUI |
+| **DSH 包版本** | `0.2.1-rc.3` / `0.2.2-rc.3`（兼容层按宿主实际 API 选择 spec 形态；0.2.0 走旧回退，详见下文「宿主兼容与升级注意」） |
 | **Node.js** | `>= 22`（内置于 DSH Desktop 运行时） |
 | **插件形态** | Cordis 后端服务补丁（`cordis.patch.yml`）+ Web GUI 客户端扩展（`lib/client.js`） |
 | **界面语言** | 中 / 英双语自适应（`zh-CN` / `en-US`） |
@@ -107,6 +108,46 @@ dsh plugin --profile desktop add https://github.com/SShiRkiT/dsh-orchestrator
 > 装完后请**完全退出并重新打开 DSH**（客户端插件在启动时组合，不支持热更新）。升级时请先在插件页**卸载旧版**再重新添加本仓库，两份同时存在会争抢同一批工具声明。
 
 ---
+
+## 宿主兼容与升级注意（DSH 0.2.1 / 0.2.2）
+
+这里说的 `0.2.1` / `0.2.2` 是 **`@deepseek-ai/dsh` 包版本**（插件管理器校验 `peerDependencies` 用的那个号），不是 Electron / 桌面端版本，也不改插件自己的 `0.8.0`。两台机器的“关于”看起来一样，装上的 DSH 包版本仍可能不同。
+
+插件用 `lib/start-compat.js` 与 `lib/deliver-compat.js` 对齐两代宿主的真实 API（签名均按各宿主随包发布的 `@deepseek-ai/dsh-subagent` 服务核对）：
+
+- **启动子代理**：0.2.1 的 `startActivation(spec)` 读嵌套的 `spec.request.parent.id / maxDepth / outputSchema / cwd`（外加外层 `provider / label / signal / delivery`）；0.2.2 改读扁平的 `spec.parent.id / maxDepth / outputSchema / prompt`。插件按宿主是否还带 `Symbol.for('dsh.subagent.deliverPrompt')` 判断形态：带该符号 = 0.2.1 及更早（嵌套），没有符号但有 `prompt` = 0.2.2+（扁平）。两种形态都在**创建子代理之前**校验，所以形态选错只会明确报错，不会留下半启动的 worker。
+- **重试投递**：0.2.1 用符号入口 `deliverPrompt(parent, childId, content, source, signal, 'queue')`；0.2.2 移除了该入口，改用 `prompt({ requestId, childSessionId, delivery: 'queue', content })`（按目标会话鉴权，不需要常驻父代理）；两代都有的 `sendMessage` 只作为退化的 steer 通道，并在正文里明确标注。
+- **0.2.0 回退**（`startContinuable` / `start`）保留，但本轮没有在真机上重新实测。
+
+### 验证到哪一步（引用时请按此口径）
+
+- **已在 VM 实机验证**：宿主为 `DSH 0.2.2-rc.3` 时，动态 `delegate`、`orchestrate` 与 plan 审批都跑通，计划审批按钮由用户实测确认。那次用的是**此前的单形态 compat 构建**。
+- **本次分支**：双形态补丁只做到**契约 / 回归测试**（`node --test --test-isolation=none`，372 项全过，覆盖 0.2.1 嵌套、0.2.2 扁平、无 `startActivation` 时的回退、路由 / parent / cwd / maxDepth / outputSchema / delivery / signal 透传、`receipt.result`、失败传播与投递通道）。**没有**在本分支构建上做真机运行，所以不能写成“最终 PR 构建实机通过”。
+- **Windows `0.2.1-rc.3`**：那台装的是**原版插件**并正常运行，这是嵌套形态的历史证据，不等同于对本分支的验证。
+- 0.2.0 回退本轮未实测；本仓库的 CI 未跑绿之前，不做“CI 通过”的表述。
+
+### 升级前后的检查清单
+
+1. **升级前先备份 profile 补丁**：把 profile 的 `cordis.patch.yml`、`package.json`（有 `pnpm-lock.yaml` 也一并）复制到 profile 之外的日期目录；插件加载失败时先还原。
+2. 升级后核对 **`enabled`**：可能被重置为关闭（主代理恢复全部工具），也可能保持开启但路由为空。
+3. 核对 **worker 路由**（`workerProvider` / `workerModel` / `workerReasoningEffort`）：留空会在派发时报错，绝不会静默回退去烧主模型。
+4. 核对 **`allowedTools`**：默认 12 项（`delegate`、`orchestrate`、`send_message`、`interrupt_agent`、`todo_write`、`ask_user_question`、`compress` 与 5 项只读会话工具）；用 plan 审批时再加 `exit_plan_mode`，需要列出子代理时加 `list_agents`。**profile 里显式写的列表是整体替换默认值，不是增量合并**——写短了就等于悄悄删掉默认放行的工具。
+5. **不要假定面板勾选一定已持久化**：升级或插件重载后，对照面板显示与 profile 里的实际值（必要时重新勾选），再确认需要的工具真的能调起来。
+
+> profile 的修复属于**配置**，不是仓库代码改动：插件本来就实时读取 `enabled`、`allowedTools` 与 worker 路由，因此正确做法是改 profile / 面板，而不是为了某台机器去改 `lib/`。示例配置见 [docs/host-compatibility.md](docs/host-compatibility.md)，其中的 provider / model 只是占位，请按你自己宿主提供的路由填写；插件不固定任何一条路由。
+
+### 升级后的最小验收
+
+审批按钮必须由人点击，agent 不能替你点。
+
+1. **delegate**：派一个“打印当前目录”的小任务，确认返回 `subagentId` 而不是启动错误。
+2. **orchestrate**：跑一个 2 条目单阶段批量，确认两项都拿到结果或单项错误（单项失败不会让整批失败）。
+3. **plan 审批**：进入 plan 模式，让 agent 调 `exit_plan_mode`，确认出现批准 / 拒绝按钮，批准后离开 plan 模式；该按钮是否正常由用户实测确认，不假定一定出现。
+4. **重试投递**：可选，只有子代理没留收尾消息就失败时才会触发。
+
+常见报错的归因：`401` / 鉴权 / 模型池 / 额度错误属于**服务凭据或路由问题**，不是兼容失败；启动期的 `Cannot read properties of undefined (reading 'id')` 这类 `TypeError` 才是 spec 形态不匹配，报告时请附上宿主的 DSH 包版本。
+
+完整 API 差异与验证边界见 [docs/host-compatibility.md](docs/host-compatibility.md)。
 
 ## 配置说明
 

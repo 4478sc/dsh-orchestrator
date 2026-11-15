@@ -68,6 +68,96 @@ dsh plugin --profile desktop add https://github.com/SShiRkiT/dsh-orchestrator
 
 After installing, **fully quit and reopen DSH**: client plugins are composed at startup and are not hot-updated. When upgrading, **remove the old version first** and then add this repository — two copies registering the same tools will fight over the same declarations.
 
+## Host compatibility and upgrade notes (DSH 0.2.1 / 0.2.2)
+
+`0.2.1` and `0.2.2` here are **`@deepseek-ai/dsh` package versions** — the number the plugin
+manager checks against `peerDependencies`. They are not Electron or desktop-app versions and
+they do not change the plugin's own `0.8.0`. Two machines can look identical in the About
+panel and still load different DSH package versions.
+
+The plugin aligns with the real APIs of both host generations in `lib/start-compat.js` and
+`lib/deliver-compat.js` (every signature below was read from the `@deepseek-ai/dsh-subagent`
+service shipped with that host):
+
+- **Starting a worker**: DSH 0.2.1's `startActivation(spec)` reads the nested
+  `spec.request.parent.id / maxDepth / outputSchema / cwd` plus the outer
+  `provider / label / signal / delivery`; 0.2.2 reads the same values flat, as
+  `spec.parent.id / maxDepth / outputSchema / prompt`. The plugin picks the shape from the
+  host's own markers: a host that still carries
+  `Symbol.for('dsh.subagent.deliverPrompt')` is 0.2.1-or-older (nested), a host without it
+  that exposes `prompt` is 0.2.2+ (flat). Both shapes are validated **before a child is
+  created**, so a wrong pick is a loud error, never a half-started worker.
+- **Retry delivery**: 0.2.1 uses the symbol entry
+  `deliverPrompt(parent, childId, content, source, signal, 'queue')`; 0.2.2 removed that entry
+  and the plugin uses `prompt({ requestId, childSessionId, delivery: 'queue', content })`
+  instead, which authorizes on the target session and needs no resident parent. The
+  `sendMessage` channel both versions keep is only a degraded steer and its text says so.
+- **The 0.2.0 fallback** (`startContinuable` / `start`) is retained, but it was **not**
+  re-exercised on a real host in this round.
+
+### What has actually been verified
+
+- **Live-verified on the VM**, host `DSH 0.2.2-rc.3`: dynamic `delegate`, `orchestrate` and
+  plan approval all worked, and the plan-approval button was confirmed by the user. That run
+  used the **earlier single-shape compat build**.
+- **This branch**: the dual-shape layer is **contract/regression tested only** —
+  `node --test --test-isolation=none`, 372 tests passing, covering the 0.2.1 nested contract,
+  the 0.2.2 flat contract, the no-`startActivation` fallback, route / parent / cwd / maxDepth /
+  outputSchema / delivery / signal pass-through, `receipt.result`, failure propagation and
+  every delivery channel. **No live run of this branch's build was performed**, so it must not
+  be described as "the final PR build passed on a real machine".
+- **Windows `0.2.1-rc.3`**: that host ran the **original, unmodified** plugin normally. That is
+  historical evidence for the nested shape; it is not a run of this branch.
+- The 0.2.0 fallback was not re-tested in this round, and no "CI is green" claim is made before
+  the repository's workflow has actually run on this branch.
+
+### Checklist before and after an upgrade
+
+1. **Back up the profile patch first**: copy the profile's `cordis.patch.yml` and
+   `package.json` (and `pnpm-lock.yaml` when present) into a dated folder outside the
+   profile; restore them first if the plugin fails to load.
+2. Re-check **`enabled`** after the upgrade — it may be reset to off (the main agent keeps
+   every tool again) or left on with an empty route.
+3. Re-check the **worker route** (`workerProvider` / `workerModel` / `workerReasoningEffort`):
+   an empty route fails at dispatch time by design and never silently falls back to the
+   expensive main model.
+4. Re-check **`allowedTools`**: the shipped default is 12 names (`delegate`, `orchestrate`,
+   `send_message`, `interrupt_agent`, `todo_write`, `ask_user_question`, `compress` and the
+   five read-only session tools); add `exit_plan_mode` when plan approval is used and
+   `list_agents` when children are listed. **A list written in the profile replaces the
+   default as a whole — it is not merged incrementally**, so a shorter list silently removes
+   tools the default would have allowed.
+5. **Do not assume the panel's checkboxes were persisted**: after an upgrade or a plugin
+   reload, compare the panel with the value actually in the profile (re-select the boxes if
+   needed) and then confirm a tool you rely on is really callable.
+
+> Repairing a profile is **configuration, not a repository code change**: the plugin already
+> reads `enabled`, `allowedTools` and the worker route live, so the fix belongs in the profile
+> or the panel — never in `lib/` for one machine. An example profile is in
+> [docs/host-compatibility.md](docs/host-compatibility.md); its provider and model are
+> placeholders, so pick a route your own host offers. The plugin does not fix any route.
+
+### Minimum acceptance after an upgrade
+
+Approval buttons need a human click; an agent cannot accept on your behalf.
+
+1. **delegate** — dispatch one trivial task ("print the current directory") and confirm it
+   returns a `subagentId` instead of a start error.
+2. **orchestrate** — run one two-item, single-stage batch and confirm both items settle with a
+   result or a per-item error (one failed item never sinks the batch).
+3. **plan approval** — enter plan mode, have the agent call `exit_plan_mode`, and confirm the
+   approve/reject buttons appear and that approving leaves plan mode. Whether that button
+   appears is confirmed by the user on their own host, never assumed.
+4. **retry delivery** — optional; it only fires when a child dies without a closing message.
+
+Reading an error: `401` / authentication / model-pool / quota failures are **service-credential
+or route problems**, not compatibility failures. A start-time `TypeError` such as
+`Cannot read properties of undefined (reading 'id')` is a spec-shape mismatch — report it with
+the host's DSH package version.
+
+The full API differences and the verification boundary are in
+[docs/host-compatibility.md](docs/host-compatibility.md).
+
 ## Enable
 
 1. Dispatch mode is already on after installing and restarting (`enabled` defaults to `true`).
