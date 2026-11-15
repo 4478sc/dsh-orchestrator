@@ -26,7 +26,7 @@ DSH 客户端自带了 `subagent` / `workflow`，官方也有 `@deepseek-ai/dsh-
 
 | 痛点场景 | 原生 `subagent` / 官方 `Agent Team` | DSH Orchestrator（本插件独有） |
 | --- | --- | --- |
-| **如何省钱配模型？**<br>*(最核心差异)* | **无独立子代理面板**：子代理要么默认继承昂贵的主模型，要么靠主模型每次调用时自己传参选模型（容易忘传或乱选，改默认模型还得改静态配置） | **双路由独立面板 + 强制锁定便宜模型**：在 UI 面板直接把 Main Agent 设为昂贵强模型（如 `gemini-4-argon-high`），把 Subagent 统一锁死为廉价快模型（如 `gemini-3.8-flash`），改完下一次委派立即生效 |
+| **如何省钱配模型？**<br>*(最核心差异)* | **无独立子代理面板**：子代理要么默认继承昂贵的主模型，要么靠主模型每次调用时自己传参选模型（容易忘传或乱选，改默认模型还得改静态配置） | **双路由独立面板 + 强制锁定便宜模型**：在 UI 面板直接把 Main Agent 设为昂贵强模型，把 Subagent 统一锁死为廉价快模型（两处都填你自己宿主提供的路由，占位写法 `<your-main-provider>/<your-main-model>`、`<your-worker-provider>/<your-worker-model>`），改完下一次委派立即生效 |
 | **主代理总忍不住自己动手？** | **靠自觉（软提示词）**：主代理 / Team Lead 手里依然握有 `read`、`edit`、`bash` 等全套工具，聊几轮就经常脱轨亲自去读文件、跑命令，瞬间撑爆主上下文 | **白名单式驱动（Whitelist-Driven Hard Gate）**：主代理默认仅放行 12 项规划与委派核心工具（`allowedTools`），其余一切宿主读写/终端工具及未来新增的 MCP/第三方插件工具一律自动隐藏并在执行层强制拦截（连 `run_code` 嵌套偷调也拦），**逼迫 Main Agent 100% 只做规划与验收，Subagent 100% 只干苦力活** |
 | **便宜模型干活卡死/跑偏怎么办？** | **运行期黑盒**：派出后只能干等结束或超时，或者靠 `wait_agent` 阻塞轮询 | **零 Token 后台巡检唤醒**：后台定时静默扫描子代理事件日志（不调模型、零 Token 消耗），超时或卡壳时自动汇总摘要唤醒主代理，由强模型发消息精准纠偏 |
 | **大批量同构任务怎么跑？** | 原生 `workflow` 让模型手写任意 JS 脚本，容易失控且模型路由不统一 | **声明式 `orchestrate` 流水线**：`items × stages` 结构化扇出与多阶段流水线，单项失败隔离、支持 JSON Schema 强校验，全部 Worker 强制走便宜的子代理路由 |
@@ -38,13 +38,13 @@ DSH 客户端自带了 `subagent` / `workflow`，官方也有 `@deepseek-ai/dsh-
 ### 1. 强模型当 Main Agent，便宜模型当 Subagent（独立面板、即时生效）
 
 在输入框下方的**「调度模式」专属面板**中，主代理与子代理的模型路由完全解耦：
-- **主代理（Main Agent）**：配置为你最强的旗舰模型（例如 `gpt-astra-6`、`claude-opus-5.5` 等），专门负责需求澄清、任务切分、途中纠偏与最终结果验收。
-- **子代理（Subagent）**：配置为能力稍弱但极其便宜、高吞吐的模型（例如 `deepseek-v4.1-flash`、`gpt-luna-6` 等），**所有通过 `delegate` 和 `orchestrate` 派出的 Worker 强制共用这条便宜路由**（除非用户在当前消息里明确点名要求临时换模型）。
+- **主代理（Main Agent）**：配置为你最强的旗舰模型（用宿主面板里实际存在的 provider / model，下文以 `<your-main-provider>/<your-main-model>` 占位），专门负责需求澄清、任务切分、途中纠偏与最终结果验收。
+- **子代理（Subagent）**：配置为能力稍弱但极其便宜、高吞吐的模型（用你宿主实际提供的路由，占位为 `<your-worker-provider>/<your-worker-model>`），**所有通过 `delegate` 和 `orchestrate` 派出的 Worker 强制共用这条便宜路由**（除非用户在当前消息里明确点名要求临时换模型）。
 - **防烧钱保护**：如果未配置子代理模型，派发时会直接报错拦截，**绝不静默回退去烧昂贵的主代理模型**。
 
 ![调度模式面板](docs/images/dispatch-panel.png)
 
-*调度模式面板：左侧独立配置主代理（如 `gemini-4-argon-high`）与子代理（如 `gemini-3.8-flash`）各自的模型、思考强度及巡检间隔；右侧 Allowed Tools（白名单式驱动）实时拉取宿主全部工具（含 MCP 与其他插件工具），勾选即放行给主代理、未勾选（含新装插件工具）默认自动禁用，无需重启，下一条消息立即对当前会话生效。*
+*调度模式面板：左侧独立配置主代理与子代理各自的模型、思考强度及巡检间隔（截图里的路由只是示例，请填自己宿主提供的 provider / model）；右侧 Allowed Tools（白名单式驱动）实时拉取宿主全部工具（含 MCP 与其他插件工具），勾选即放行给主代理、未勾选（含新装插件工具）默认自动禁用，无需重启，下一条消息立即对当前会话生效。*
 
 ### 2. 主代理「规划与验收」、子代理「纯粹 Work」的白名单式硬性闸门
 
@@ -118,11 +118,12 @@ dsh plugin --profile desktop add https://github.com/SShiRkiT/dsh-orchestrator
 - **启动子代理**：0.2.1 的 `startActivation(spec)` 读嵌套的 `spec.request.parent.id / maxDepth / outputSchema / cwd`（外加外层 `provider / label / signal / delivery`）；0.2.2 改读扁平的 `spec.parent.id / maxDepth / outputSchema / prompt`。插件按宿主是否还带 `Symbol.for('dsh.subagent.deliverPrompt')` 判断形态：带该符号 = 0.2.1 及更早（嵌套），没有符号但有 `prompt` = 0.2.2+（扁平）。两种形态都在**创建子代理之前**校验，所以形态选错只会明确报错，不会留下半启动的 worker。
 - **重试投递**：0.2.1 用符号入口 `deliverPrompt(parent, childId, content, source, signal, 'queue')`；0.2.2 移除了该入口，改用 `prompt({ requestId, childSessionId, delivery: 'queue', content })`（按目标会话鉴权，不需要常驻父代理）；两代都有的 `sendMessage` 只作为退化的 steer 通道，并在正文里明确标注。
 - **0.2.0 回退**（`startContinuable` / `start`）保留，但本轮没有在真机上重新实测。
+- **工具目录的根代理枚举**：0.2.1 及更早的 `AgentRegistry` 提供 `roots()`；0.2.2 只提供 `list()`，且返回**全部存活代理**（含被委派的子代理）。插件优先用 `roots()`；宿主只有 `list()` 时，先按宿主自己的深度规则（`max(options.subagentDepth, session.header.delegationDepth)`）筛出根代理，再读各自 scope 注册的工具。因此 GUI fork（有 `parentSession` 但深度为 0）仍算主代理；子代理 scope 的私有工具不会被混进主代理面板。注册表读不到或抛错时只保留全局工具，**绝不拿“全部代理”兜底**。这条决定了 Allowed Tools 面板能不能看到 `exit_plan_mode`、`list_agents` 这类 scope 内工具。
 
 ### 验证到哪一步（引用时请按此口径）
 
 - **已在 VM 实机验证**：宿主为 `DSH 0.2.2-rc.3` 时，动态 `delegate`、`orchestrate` 与 plan 审批都跑通，计划审批按钮由用户实测确认。那次用的是**此前的单形态 compat 构建**。
-- **本次分支**：双形态补丁只做到**契约 / 回归测试**（`node --test --test-isolation=none`，372 项全过，覆盖 0.2.1 嵌套、0.2.2 扁平、无 `startActivation` 时的回退、路由 / parent / cwd / maxDepth / outputSchema / delivery / signal 透传、`receipt.result`、失败传播与投递通道）。**没有**在本分支构建上做真机运行，所以不能写成“最终 PR 构建实机通过”。
+- **本次分支**：双形态补丁与工具目录的根代理枚举只做到**契约 / 回归测试**（`node --test --test-isolation=none`，381 项全过，覆盖 0.2.1 嵌套、0.2.2 扁平、无 `startActivation` 时的回退、路由 / parent / cwd / maxDepth / outputSchema / delivery / signal 透传、`receipt.result`、失败传播与投递通道，以及 `roots()` / `list()` 两种根枚举、持久化深度、GUI fork、坏注册表与目录更新事件）。**没有**在本分支构建的宿主动态运行上验证工具目录（主机 runtime 需重启后才能看到新构建，VM 的验收见 PR 说明），所以不能写成“最终 PR 构建实机全链路通过”。
 - **Windows `0.2.1-rc.3`**：那台装的是**原版插件**并正常运行，这是嵌套形态的历史证据，不等同于对本分支的验证。
 - 0.2.0 回退本轮未实测；本仓库的 CI 未跑绿之前，不做“CI 通过”的表述。
 
@@ -131,10 +132,49 @@ dsh plugin --profile desktop add https://github.com/SShiRkiT/dsh-orchestrator
 1. **升级前先备份 profile 补丁**：把 profile 的 `cordis.patch.yml`、`package.json`（有 `pnpm-lock.yaml` 也一并）复制到 profile 之外的日期目录；插件加载失败时先还原。
 2. 升级后核对 **`enabled`**：可能被重置为关闭（主代理恢复全部工具），也可能保持开启但路由为空。
 3. 核对 **worker 路由**（`workerProvider` / `workerModel` / `workerReasoningEffort`）：留空会在派发时报错，绝不会静默回退去烧主模型。
-4. 核对 **`allowedTools`**：默认 12 项（`delegate`、`orchestrate`、`send_message`、`interrupt_agent`、`todo_write`、`ask_user_question`、`compress` 与 5 项只读会话工具）；用 plan 审批时再加 `exit_plan_mode`，需要列出子代理时加 `list_agents`。**profile 里显式写的列表是整体替换默认值，不是增量合并**——写短了就等于悄悄删掉默认放行的工具。
+4. 核对 **`allowedTools`**：默认 12 项（`delegate`、`orchestrate`、`send_message`、`interrupt_agent`、`todo_write`、`ask_user_question`、`compress` 与 5 项只读会话工具）；用 plan 审批时再加 `exit_plan_mode`，需要列出子代理时加 `list_agents`。**profile 里显式写的列表是整体替换默认值，不是增量合并**——写短了就等于悄悄删掉默认放行的工具；面板点“重置为默认”或删掉这一项也会回到内置 12 项，两个 scope 内工具随之消失，需要重新加回。**面板里能看到某个工具名不等于它已放行**：那只是 `toolCatalog` 的只读快照，真正生效的是写进 `allowedTools` 的名字（精确匹配）。完整示例见下方与 [docs/host-compatibility.md](docs/host-compatibility.md)。
 5. **不要假定面板勾选一定已持久化**：升级或插件重载后，对照面板显示与 profile 里的实际值（必要时重新勾选），再确认需要的工具真的能调起来。
 
-> profile 的修复属于**配置**，不是仓库代码改动：插件本来就实时读取 `enabled`、`allowedTools` 与 worker 路由，因此正确做法是改 profile / 面板，而不是为了某台机器去改 `lib/`。示例配置见 [docs/host-compatibility.md](docs/host-compatibility.md)，其中的 provider / model 只是占位，请按你自己宿主提供的路由填写；插件不固定任何一条路由。
+> profile 的修复属于**配置**，不是仓库代码改动：插件本来就实时读取 `enabled`、`allowedTools` 与 worker 路由，因此正确做法是改 profile / 面板，而不是为了某台机器去改 `lib/`。示例配置见 [docs/host-compatibility.md](docs/host-compatibility.md)，其中的 provider / model 只是占位，请按你自己宿主提供的路由填写；插件不固定任何一条路由，也不把任何私有模型写死进仓库默认值。
+
+### Allowed Tools：`toolCatalog` 与 `allowedTools` 的区别（能看见 ≠ 能用）
+
+- **`toolCatalog`**：插件从宿主工具注册表读出的**只读快照**，等于“全局工具 ∪ 每个存活根代理 scope 注册的工具”（`exit_plan_mode`、`list_agents`、原生 `subagent`、`ops_*` 等都在里面）。它只负责把清单交给面板渲染，**不写 profile、也不代表放行**。宿主读不到根代理时它只含全局工具，面板因此可能少几行。
+- **`allowedTools`**：执行层真正生效的**白名单**。按**完整工具名精确匹配**（不支持前缀、通配或子串）；名字没写进列表的工具一律隐藏并在执行层拒绝，即使它出现在 `toolCatalog` 里。反过来，写进列表但宿主根本没注册的名字不会报错，只是永远不生效——所以能用 `exit_plan_mode` / `list_agents` 的前提是：**宿主注册了它，并且 `allowedTools` 里有它**。
+- **整体替换、不是合并**：`allowedTools` 一旦在 profile 里显式写出，就整体替换内置默认 12 项；`enabled`、worker 路由等其它字段照常保留。面板“重置为默认”、profile 重置或删掉该字段，都会回到内置 12 项。
+
+完整写法（provider / model 是占位，必须换成你自己宿主提供的路由）：
+
+```yaml
+# <profile>/cordis.patch.yml —— 只列相关行，其它配置原样保留
+- id: orchestrator
+  name: dsh-orchestrator
+  config:
+    enabled: true
+    workerProvider: <your-worker-provider>   # 例如面板里能看到的 provider id
+    workerModel: <your-worker-model>         # 例如你自己选的便宜模型
+    workerReasoningEffort: ""
+    superviseIntervalSeconds: 600
+    allowedTools:
+      # —— 内置默认 12 项（显式列表必须写全，写短等于删权）——
+      - delegate
+      - orchestrate
+      - send_message
+      - interrupt_agent
+      - todo_write
+      - ask_user_question
+      - compress
+      - session_search
+      - session_trace
+      - session_event_search
+      - session_event_read
+      - session_event_trace
+      # —— 按需追加：scope 内工具必须同时被宿主注册且在此列出 ——
+      - exit_plan_mode
+      - list_agents
+```
+
+> 这份列表是**你这台机器的用户环境配置**，不是仓库默认值：仓库的 `DEFAULT_ALLOWED_TOOLS` 始终是 12 项，不会为了某台机器或某条私有路由而改动。
 
 ### 升级后的最小验收
 
@@ -158,7 +198,8 @@ dsh plugin --profile desktop add https://github.com/SShiRkiT/dsh-orchestrator
 | `enabled` | `true` | 调度模式总开关。关闭时立即对当前会话恢复主代理全部工具。 |
 | `workerProvider` / `workerModel` | `""` | 子代理默认模型路由（必填，未配置时派发直接报错，绝不静默继承主代理模型）。 |
 | `workerReasoningEffort` | `""` | 子代理思考强度，留空则由所选模型自行决定默认值。 |
-| `allowedTools` | 12 项内置白名单 | 白名单式驱动：主代理仅可使用列表内的工具，其余宿主/MCP/插件工具自动隐藏并禁用；面板右侧 Allowed Tools 可直接勾选放行或取消勾选禁用，下一条消息即刻生效。 |
+| `allowedTools` | 12 项内置白名单 | 白名单式驱动：主代理仅可使用列表内的工具，其余宿主/MCP/插件工具自动隐藏并禁用；面板右侧 Allowed Tools 可直接勾选放行或取消勾选禁用，下一条消息即刻生效。显式写出的列表整体替换默认值、不合并；面板“重置为默认”会回到内置 12 项。 |
+| `toolCatalog` | `[]` | 插件发布的只读工具目录：宿主当前注册的全部工具名（全局工具 + 存活根代理 scope 注册的工具），面板据此列出 12 项默认白名单之外的 MCP / 插件 / scope 内工具。由插件写入，**不要手改**；它只表示“能看见”，不表示已放行。 |
 | `superviseEnabled` | `true` | 子代理后台巡检总开关。 |
 | `superviseIntervalSeconds` | `600` | 巡检间隔（秒），范围 10–86400，运行中修改立即生效。 |
 | `superviseMaxNoticesPerChild` | `3` | 每个子代理最多发送几次巡检通知（0–20）。`0` 表示关闭巡检（运行中的子代理仍保留在注册表中，改回 >0 或打开无限巡检后立即恢复）。 |
