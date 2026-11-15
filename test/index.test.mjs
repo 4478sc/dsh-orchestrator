@@ -1134,11 +1134,11 @@ test('the retry prompt goes through the host protocol entry, as a queued turn of
   assert.equal(typeof signal?.aborted, 'boolean')
 })
 
-test('the retry prompt refuses a host without the entry, and a parent that is gone', async () => {
+test('the retry prompt refuses a host with no delivery channel, and a parent that is gone', async () => {
   const parent = { id: 'parent-1' }
   await assert.rejects(
     mod.deliverRetryPrompt({ agents: { get: () => parent }, subagents: {} }, 'parent-1', 'child-1', '继续'),
-    /does not expose dsh\.subagent\.deliverPrompt/,
+    /exposes neither dsh\.subagent\.deliverPrompt nor subagents\.prompt/,
   )
   const withEntry = {
     agents: { get: () => undefined },
